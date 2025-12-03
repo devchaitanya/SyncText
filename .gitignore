@@ -1,0 +1,31 @@
+# Build artifacts
+build/*.o
+build/editor
+
+# User document files (generated in user_docs/)
+user_docs/*_doc.txt
+
+# Log files (generated in log_files/)
+log_files/*.log
+
+# Test data files (in data/ from old tests)
+data/*.txt
+data/*.log
+
+# Backup files
+*.txt_doc.txt
+*.bak
+*~
+
+# IDE files
+.vscode/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Message queues and shared memory (runtime artifacts)
+/dev/mqueue/synctext_*
+/dev/shm/synctext_*
