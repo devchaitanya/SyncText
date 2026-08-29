@@ -2,8 +2,12 @@
 build/*.o
 build/editor
 
-# User document files (generated in user_docs/)
+# User document files (generated in user_docs/, incl. per --doc subdirectories)
 user_docs/*_doc.txt
+user_docs/*/
+
+# Editor-window tty markers
+log_files/.*_edit_tty
 
 # Log files (generated in log_files/)
 log_files/*.log

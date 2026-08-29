@@ -30,6 +30,8 @@ namespace synctext {
 constexpr size_t MAX_USERS = 5;                     ///< Maximum concurrent users in the shared registry.
 constexpr size_t USER_ID_MAX = 32;                  ///< Maximum length of a user's identifier string.
 constexpr size_t QUEUE_NAME_MAX = 64;               ///< Maximum length for a POSIX message queue name.
+constexpr size_t DOC_PATH_MAX = 512;                ///< Maximum length of a published document path.
+constexpr uint32_t REGISTRY_VERSION = 2;            ///< Layout version; a registry at any other version is reinitialized.
 constexpr const char* REGISTRY_SHM_NAME = "/synctext_registry"; ///< Name of the POSIX shared memory object.
 constexpr long MQ_MSGSIZE = 2048;                   ///< Maximum size of a single message in the message queue.
 constexpr size_t RX_RING_CAP = 4096;                ///< Capacity of the inbound message ring buffer.
@@ -52,6 +54,11 @@ struct UserEntry {
     char user_id[USER_ID_MAX];              ///< Null-terminated user identifier.
     char queue_name[QUEUE_NAME_MAX];        ///< Null-terminated name of the user's message queue.
     std::atomic<uint64_t> last_heartbeat_ns;///< Timestamp of the last heartbeat, for detecting timeouts.
+    /// Absolute path to this user's document. Published because every participant
+    /// resolves its own document relative to its working directory, and a second
+    /// session is usually started from a different one -- a peer that only knew the
+    /// relative path could not find the document to seed itself from.
+    char doc_path[DOC_PATH_MAX];
 };
 
 /**
@@ -88,7 +95,8 @@ struct Update {
         LineInsert,   ///< Insertion of one or more whole lines.
         LineDelete,   ///< Deletion of one or more whole lines.
         BlockInsert,  ///< Insertion of a multi-line block of text.
-        BlockDelete   ///< Deletion of a multi-line block of text.
+        BlockDelete,  ///< Deletion of a multi-line block of text.
+        Cursor        ///< Not a document edit: reports where a peer's caret is (line_no/col_start).
     } type;
     
     size_t line_no;                 ///< The 1-based line number where the change begins.
