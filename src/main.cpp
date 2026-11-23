@@ -150,6 +150,16 @@ int run_main(int argc, char** argv) {
     argc = (int)args.size();
     argv = args.data();
 
+    // Logging level first, before any thread exists: the receive and network threads
+    // read it, so setting it after they start is a data race (ThreadSanitizer), and
+    // --serve, which returns early below, would never see it at all.
+    g_debug_msg = parse_env_bool("SYNCTEXT_DEBUG_MSG", false);
+    g_debug_level = parse_env_millis("SYNCTEXT_DEBUG_LEVEL", g_debug_level);
+    if (g_debug_level < 0) g_debug_level = 0;
+    if (g_debug_level > 3) g_debug_level = 3;
+    // Backward compatibility: if legacy flag enabled and explicit level not set (level==0) elevate to verbose
+    if (g_debug_msg && g_debug_level == 0) g_debug_level = 2;
+
     // --serve is the one mode that takes several documents, so it is decided before
     // the single-document rule below is applied.
     bool is_serve = argc >= 2 && std::string(argv[1]) == "--serve";
@@ -469,13 +479,6 @@ int run_main(int argc, char** argv) {
     g_mq_maxmsg = parse_env_millis("SYNCTEXT_MQ_MAXMSG", g_mq_maxmsg);
     if (g_mq_maxmsg < 8) g_mq_maxmsg = 8;
     if (g_mq_maxmsg > 1024) g_mq_maxmsg = 1024;
-    // Debug flag for verbose messaging
-    g_debug_msg = parse_env_bool("SYNCTEXT_DEBUG_MSG", false);
-    g_debug_level = parse_env_millis("SYNCTEXT_DEBUG_LEVEL", g_debug_level);
-    if (g_debug_level < 0) g_debug_level = 0;
-    if (g_debug_level > 3) g_debug_level = 3;
-    // Backward compatibility: if legacy flag enabled and explicit level not set (level==0) elevate to verbose
-    if (g_debug_msg && g_debug_level == 0) g_debug_level = 2;
     // Open the local editor (best-effort, non-blocking). Skipped when we are the editor.
     if (!g_tui) open_local_editor_if_possible();
 

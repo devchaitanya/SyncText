@@ -23,7 +23,7 @@ Run the comprehensive test suite:
 ```bash
 ./run_all_tests.sh
 ```
-This runs 19 test groups (59 assertions):
+This runs 20 test groups (61 assertions):
 - Multi-line paste (13 lines)
 - Mass insert (50 lines)
 - Delete-all operation
@@ -43,6 +43,7 @@ This runs 19 test groups (59 assertions):
 - Messages lost to a stalled peer, repaired automatically (anti-entropy)
 - Concurrent LAN edits, and an edit made while a peer was going down
 - Concurrent typing in the built-in editor (same line, same spot, three editors, caret stability)
+- Concurrent edits in repeated text landing where each user meant them (one editor paused with SIGSTOP)
 
 The CRDT itself has unit tests (including a fuzz test over a lossy, reordering network):
 ```bash
