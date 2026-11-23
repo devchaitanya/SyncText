@@ -96,14 +96,16 @@ struct Update {
         LineDelete,   ///< Deletion of one or more whole lines.
         BlockInsert,  ///< Insertion of a multi-line block of text.
         BlockDelete,  ///< Deletion of a multi-line block of text.
-        Cursor        ///< Not a document edit: reports where a peer's caret is (line_no/col_start).
+        Cursor,       ///< Not a document edit: reports where a peer's caret is (line_no/col_start).
+        CrdtOps,      ///< A batch of CRDT ops (new_content); old_content = addressee or "".
+        CrdtSync      ///< A version vector (new_content); old_content = the sender's client id.
     } type;
     
     size_t line_no;                 ///< The 1-based line number where the change begins.
     size_t col_start, col_end;      ///< The 1-based column range of the change (for Insert, Delete, Replace).
     std::string old_content;        ///< The content that was removed or replaced.
     std::string new_content;        ///< The content that was inserted or that replaced old content.
-    uint64_t timestamp_ns;          ///< High-precision timestamp for Last-Writer-Wins conflict resolution.
+    uint64_t timestamp_ns;          ///< Send time (informational; CRDT order comes from Lamport counters).
     std::string user_id;            ///< The identifier of the user who made the change.
 };
 

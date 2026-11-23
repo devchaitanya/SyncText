@@ -1,12 +1,12 @@
 CXX := g++
-CXXFLAGS := -std=gnu++17 -O2 -Wall -Wextra -Wpedantic
+CXXFLAGS := -std=gnu++17 -O2 -Wall -Wextra -Wpedantic -MMD -MP
 LDFLAGS := -pthread -lrt
 
 BUILD_DIR := build
 SRC_DIR := src
 
 TARGET := $(BUILD_DIR)/editor
-SRCS := $(SRC_DIR)/editor.cpp
+SRCS := $(wildcard $(SRC_DIR)/*.cpp)
 OBJS := $(SRCS:$(SRC_DIR)/%.cpp=$(BUILD_DIR)/%.o)
 
 .PHONY: all clean dirs editor run test
@@ -40,3 +40,5 @@ $(TARGET): $(OBJS)
 
 clean:
 	rm -rf $(BUILD_DIR)
+
+-include $(OBJS:.o=.d)

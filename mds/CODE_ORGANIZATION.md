@@ -1,5 +1,7 @@
 # Code Organization
 
+> **Note:** `src/editor.cpp` has since been split into one file per subsystem, with the code unchanged. The list of files is at the top of `src/main.cpp`; what they share is in `src/shared.h`. Where this document says "editor.cpp", read "the files in `src/`".
+
 This document explains how the SyncText codebase is organized after refactoring for improved readability.
 
 ## File Structure

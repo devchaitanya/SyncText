@@ -1,6 +1,6 @@
 # SyncText — CRDT-Based Collaborative Text Editor
 
-SyncText is a lightweight collaborative editor that discovers peers via a shared-memory registry and exchanges edits over POSIX message queues. It maintains convergence using a pragmatic CRDT-style merge with Last-Writer-Wins arbitration.
+SyncText is a lightweight collaborative editor that discovers peers via a shared-memory registry and exchanges edits over POSIX message queues. Edits are merged with a sequence CRDT (RGA): every copy that has received the same edits shows the same text, in whatever order the edits arrived, and concurrent edits — even on the same line — are all kept.
 
 ## Build
 
@@ -23,22 +23,38 @@ Run the comprehensive test suite:
 ```bash
 ./run_all_tests.sh
 ```
-This runs 15 test groups (44 assertions):
+This runs 19 test groups (59 assertions):
 - Multi-line paste (13 lines)
 - Mass insert (50 lines)
 - Delete-all operation
 - Non-conflicting edits
-- Conflicting edits (LWW)
+- Sequential edits of the same line
 - Structural line insert
 - Structural line delete
-- LAN mode over TCP (snapshot on connect, host/joiner relay, access-code rejection)
-- LAN host failover (roster propagation, promotion of the next survivor, cascading failover)
+- LAN mode over TCP (join, edits reaching every peer, access-code rejection)
+- LAN mesh (direct links between joiners, losing any peer, joining through any peer)
 - Cross-directory startup sync (a session started from another working directory)
 - Separate editor window (editor on one terminal, monitor on the other)
 - Built-in terminal editor (per-keystroke propagation, peer carets, Return/Backspace, clean exit)
 - Separate documents by name, and rejection of unsafe names
 - The access code selecting one shared document out of several
-- Automatic identities (a second session of one account, and a host renaming a joiner)
+- Automatic identities for a second session of the same account
+- Concurrent saves by three users at once, two on the same line (every edit kept)
+- Messages lost to a stalled peer, repaired automatically (anti-entropy)
+- Concurrent LAN edits, and an edit made while a peer was going down
+- Concurrent typing in the built-in editor (same line, same spot, three editors, caret stability)
+
+The CRDT itself has unit tests (including a fuzz test over a lossy, reordering network):
+```bash
+cd tests/crdt && make test     # or: make asan, make bench
+```
+That is 4632 checks, including 30 seeds × 4 replicas × 3000 random steps over a network
+that drops, duplicates and reorders messages; every run ends with identical replicas.
+
+End-to-end latency and join time between real processes (see [Performance](#performance)):
+```bash
+python3 tests/perf_e2e.py
+```
 
 The terminal-editor test drives two editors over real PTYs via
 `tests/tui_pty_test.py`, and is skipped if `python3` is unavailable.
@@ -89,19 +105,13 @@ The caret of each peer is highlighted in the text at its exact line and column, 
 listed in the footer. A peer's caret disappears if nothing is heard from it for 15
 seconds.
 
-#### Convergence limits when two people type at once
+#### Two people typing at once
 
-The merge is Last-Writer-Wins at line granularity, not a character-level CRDT. Two
-people editing *different* lines, or taking turns on the same line, converge reliably.
-Two people typing into the **same line at the same time** do not: each local keystroke
-stamps that line's timestamp, so incoming remote edits older than the stamp are dropped
-as stale, and the two copies can stay diverged after the typing stops.
-
-This is a property of the merge algorithm, not of the terminal editor -- the same
-divergence is reproducible through the file-watch path with no editor involved. The
-built-in editor makes it easier to hit, because it publishes every keystroke rather
-than every save. Converging that case properly needs a character-level CRDT (RGA or
-similar), which is a redesign of the merge stage rather than a fix.
+Every character has a permanent ID, so concurrent edits never fight over line or column
+numbers: two people typing into the same line at the same moment both keep their text,
+words typed at the same spot stay whole, and every copy ends up byte-for-byte identical.
+A caret is anchored to the character next to it, so it does not jump when someone types
+earlier in the line. See "How edits are merged" below.
 
 #### A window of its own
 
@@ -190,8 +200,7 @@ That is the whole interface. There is no user id and no port to choose:
 
 Everything else is an environment variable rather than an argument, so the common case
 stays short. `SYNCTEXT_USER` fixes the identity (scripts and the test suite use it),
-`SYNCTEXT_PORT_BASE` / `SYNCTEXT_PORT_SPAN` move or resize the port range, and
-`SYNCTEXT_MERGE_BATCH_N` sets the merge batch size.
+and `SYNCTEXT_PORT_BASE` / `SYNCTEXT_PORT_SPAN` move or resize the port range.
 
 #### Working on more than one document
 
@@ -323,14 +332,14 @@ lands in `user_docs/notes/` automatically.
 other:
 
 ```
-Active users  ● chaitu (host)   ● chaitu-2
+Active users  ● chaitu   ● chaitu-2
 ```
 
 Type on either machine. Characters appear on the other as they are typed, and each
 caret is drawn in the text in its own colour.
 
-**5. Quitting.** `Ctrl-Q`. If A quits or crashes the session survives — B is promoted
-to host and the bar shows `[host gen 1]`. To end it entirely, quit everyone.
+**5. Quitting.** `Ctrl-Q`. If A quits or crashes the session carries on — nobody is
+special once joined (see *LAN mesh* below). To end it entirely, quit everyone.
 
 ##### Before you start, three things worth knowing
 
@@ -375,42 +384,41 @@ Some networks — many public, campus and guest WiFi setups — block traffic be
 clients ("AP isolation"). If `ping` works but the port never opens, that is the likely
 cause; a phone hotspot with both machines on it is the quickest way to rule it out.
 
-#### Host failover
+#### LAN mesh
 
-A LAN session survives the loss of its host. The host maintains a **roster** — itself
-first, then joiners in the order they connected — and rebroadcasts it to everyone on
-every membership change. That roster doubles as the succession order.
+Once joined, every participant holds a **direct TCP link to every other one** — a full
+mesh. An edit goes straight from its author to each peer; nobody relays it, and there is
+no host to lose. `--host` only means "start the session and listen on a known port".
 
-When the host's socket drops, each survivor independently walks the same list:
+1. **Joining.** A joiner dials any participant — normally the one that ran `--host`,
+   but any participant's port works. It receives the document id, its identity, the
+   current file and, over the CRDT, the full history (from that one peer only).
+2. **Gossip.** Whenever a participant's set of links changes, it sends the list of
+   peers it is linked to (with their addresses) to all of them. That is how everyone
+   hears about a newcomer.
+3. **Linking.** For every peer it has heard of but has no link to, the participant
+   with the *smaller user id* dials, so a pair never opens two links. A link handshake
+   checks the code and document but carries no file.
+4. **Leaving.** A broken link is dropped and the list re-gossiped. There is no
+   election: everyone else keeps editing. A link to a peer that is still alive is
+   dialled again, with back-off.
+5. **Repair.** The version-vector exchange runs over every link, so even a peer that
+   is temporarily reachable only through someone else converges — that someone has
+   its ops and hands them on.
 
-1. Drop the dead host from the roster.
-2. If the next entry is *me*, promote to host and start serving.
-3. Otherwise, dial that survivor's advertised address and rejoin as a joiner,
-   retrying briefly while it promotes itself.
-4. If that candidate never comes up, skip it and repeat with the next one.
+The CRDT is what makes this simple: ops may arrive in any order, over any path, more
+than once, and every replica still ends up identical.
 
-Because every node acts on the same broadcast roster, they converge on the same
-successor without any voting round-trip. Failover cascades: kill the promoted host and
-the next survivor takes over, down to a lone participant hosting by itself. The
-`Active users` line shows the current host and a `[host gen N]` counter that increments
-on each promotion.
+Cost: each participant holds n−1 links (n² overall), which is nothing for a LAN
+session of a handful of people. Limits worth knowing: two newcomers joining with the
+same identity at the same moment through *different* peers are not renamed apart; a
+peer that is unreachable from some others (a firewall in between) is served only by
+anti-entropy through the peers that can reach it; and the document still crosses the
+wire in the clear.
 
-Every participant binds a listening socket at startup — a joiner's simply sits idle
-until it is elected — so promotion needs no new bind and no coordination. A joiner
-normally binds the same session port on its own machine; if that port is already taken
-locally (two participants on one host, as in the test suite) it falls back to an
-ephemeral port, which the host records and publishes in the roster. One consequence:
-after a failover in that same-machine case, the new host is reachable at its ephemeral
-port rather than the original session port, so a *fresh* `--join` needs that port.
-
-On rejoin, a survivor adopts the new host's snapshot only if it made no local edits
-while the link was down; otherwise it keeps its own copy and the normal diff/merge path
-reconciles the two.
-
-Limits worth knowing: election is best-effort, not consensus. If the host dies before a
-just-connected joiner has received its first roster, two nodes can briefly both promote.
-There is no fencing and no split-brain merge, and the document still crosses the wire in
-the clear.
+`--serve` is the one star-shaped case: the server relays between its clients, so they
+link only to it. If the server goes away they link to each other directly, using the
+addresses from its roster, and carry on as a mesh.
 
 LAN example:
 ```bash
@@ -475,35 +483,60 @@ rm -f /dev/mqueue/synctext_*         # per-user message queues
 
 Each registry is about 3 KB, so this is housekeeping rather than anything urgent.
 
+## Code layout
+
+The program is split into one file per subsystem under `src/`. The top of `src/main.cpp` lists every file; `src/shared.h` holds what the files share. A good reading order:
+
+1. `main.cpp`: `run_main()` sets everything up and runs the event loop: detect a change, hand it to the sync engine, apply what arrived, write the file, redraw.
+2. `rga.h` / `rga.cpp`: the sequence CRDT (character nodes with IDs, tombstones, a counted B-tree for positions, the replica with version vectors).
+3. `sync.cpp`: the sync engine between the editor and the CRDT: file diff -> ops, the wire encoding, joining a session, anti-entropy.
+4. `registry.cpp`, `broadcast.cpp`, `listener.cpp`, `inbox.cpp`: how processes on one machine find each other and exchange updates.
+5. `net.cpp` (and `serve.cpp`): the same over TCP, as a full mesh of links (`--serve` relays).
+6. `tui.cpp`, `monitor.cpp`, `watcher.cpp`: the editor, the display, and file watching.
+
 ## Core features
 - Start program with `./build/editor <doc>`
 - User registration & discovery via shared memory registry (up to 5 concurrent users)
 - Per-participant local copy `user_docs/<doc>/<you>_doc.txt` with initial content
 - Continuous monitoring with automatic diff detection
 - Real-time terminal display showing current document, active users, and change summaries
-- Update objects created for each detected change: type, line, column range, old/new payloads, timestamp, and user id
+- Each detected change becomes CRDT operations ("insert after character X", "delete character X")
 
-## Edit operations supported
-Inline (same line):
-- Insert, Delete, Replace
+## How edits are merged
+- **IDs.** Every character is a node with a permanent ID `(Lamport counter, client id)`. The client id is random per session, so a restarted user is never confused with their old session.
+- **Operations.** A change is sent as "insert `c` after node X" or "delete node X". Deleted nodes stay as hidden tombstones, so an edit anchored on a just-deleted character still lands correctly.
+- **Concurrent inserts at one spot** are ordered by comparing IDs (bigger first), the same rule on every copy; text typed after a character always has a bigger counter, so whole words are never interleaved.
+- **From file to ops.** The engine diffs the file against what it last showed (line-level LCS, then character trimming) and maps each changed range onto the nodes that were on screen. Because nodes never move, a local save lands correctly even if remote edits were merged in between.
+- **Delivery.** Ops are batched (a run of typing travels as one record with its string) inside `Update` messages, so message queues, TCP links and the `--serve` relay carry them unchanged. Duplicates are ignored and an op that arrives before what it depends on waits.
+- **Repair.** Every few seconds each participant sends its version vector; a peer that has ops it lacks sends them. This repairs messages dropped by a full queue, and edits that crossed a LAN link while it was breaking.
+- **Joining.** A newcomer asks a live peer for the whole history. The first participant has nobody to ask, so it imports its file with IDs derived from a hash of the text: two people starting from the same file at the same moment do not duplicate it.
+- **Writing back.** Merged text is written to your file only when it is safe: not within 300 ms of your own save, never over a save SyncText has not read yet, and only once the file has been quiet for 40 ms. Its own write then becomes the new baseline, so reading it back produces no edit (no echo). The built-in editor owns its buffer and takes remote edits immediately.
 
-Structural (line-level):
-- LineInsert, LineDelete
+## Performance
 
-Block (multi-line batches):
-- BlockInsert, BlockDelete
+Measured on one Linux laptop (release build, `-O2`); "LAN" is TCP over loopback.
 
-Application order: structural deletes (descending) → structural inserts (ascending) → inline ops rebased on the structural result. Conflicts resolve with Last-Writer-Wins (nanosecond timestamp; ties broken by user id). Same-user adjacency is allowed (no self-conflict).
+| | Local (message queues) | LAN (TCP mesh) |
+|---|---|---|
+| Keystroke in the built-in editor → peer's file, p50 / p95 | 0.7 / 0.8 ms | 0.7 / 0.8 ms |
+| Joining a running session, 10 / 100 / 500 KB document | 24 / 155 / 2006 ms | 105 / 121 / 675 ms |
+| One message, one way | ~2.2 µs | ~4.6 µs |
 
-Block operations are disabled by default for maximum compatibility and stability. Enable cautiously (see Environment).
+Inside the CRDT (`tests/crdt/build/bench_rga`):
+- local typing: ~0.9 µs per keystroke; applying remote ops: ~1.1 µs per op (a 150k-op history in 159 ms);
+- finding a character's row and column: 0.66 µs at 100k characters, 1.3 µs at 1M (walking the list: 0.7 ms / 7 ms);
+- wire size: 56 bytes for a single keystroke, 1 byte per character for a typed or pasted run;
+- memory: about 340 bytes per character typed during a session (deleted characters stay as tombstones until the session ends).
 
-## Merge (CRDT-style) overview
-- Remote-only arbitration: only remote updates participate in conflict resolution to avoid self-dupes.
-- Last-Writer-Wins with user-id tiebreaker.
-- Per-line local timestamps drop stale remote updates and prevent “resurrects”.
-- Coarse stale-remote suppression: remote inserts older than your last local delete epoch are dropped.
-- Deferred-merge write with grace window to avoid racing active editors; post-merge echo suppression window avoids re-diffing our own writes.
-- Broadcast chunking and background draining to deliver long sequences without storms.
+## Known limitations
+
+- **Local transport.** Linux caps an unprivileged message queue at 10 messages, so large transfers (joining a big document) are slower locally than over TCP, and a full queue is retried on the main loop.
+- **LAN latency outliers.** A frame is written as two `send()` calls without `TCP_NODELAY`, so an occasional message waits ~40 ms for Nagle's algorithm.
+- **External editors.** An editor that saves a buffer it loaded before a peer's change reverts that change: SyncText sees a real edit. The built-in editor does not have this problem.
+- **Atomic saves.** Editors that write a temporary file and rename it over the document end the file watch; later saves are then picked up by the periodic check (within the idle refresh interval) instead of instantly.
+- **Memory** grows with everything typed in a session; it is released when everyone leaves and a new session starts from the file.
+- **Scale.** Up to 5 participants per document on one machine; a LAN mesh holds one link per pair of participants, which suits small groups.
+- **Security.** The access code travels in plain text and the IPC objects are created world-readable; use it on trusted machines and networks only.
 
 ## Environment
 
@@ -513,26 +546,25 @@ Identity, document and network (these replace what used to be command-line argum
 - `SYNCTEXT_PORT_BASE` (default 9000) — first port a host takes / a joiner scans
 - `SYNCTEXT_PORT_SPAN` (default 16) — how many consecutive ports to try
 - `SYNCTEXT_CONNECT_TIMEOUT_MS` (default 10000) — bound on each connect and handshake
-- `SYNCTEXT_MERGE_BATCH_N` (default 1) — merge only after N updates accumulate
+- `SYNCTEXT_ANTI_ENTROPY_MS` (default 2000) — how often version vectors are exchanged
+- `SYNCTEXT_SYNC_TIMEOUT_MS` (default 500) — per-attempt wait for a join reply before retrying
+- `SYNCTEXT_FILE_WRITE_DELAY_MS` (default 40) — hold merged text this long (and until the file has been quiet this long) before writing it, so a save that coincides with a peer's edit is read first; the built-in editor is not delayed
 - `SYNCTEXT_TUI` (default: on when stdin and stdout are terminals) — built-in editor
 - `SYNCTEXT_EDIT_WINDOW` / `SYNCTEXT_EDIT_TTY` — editor in its own window
 
 Stability/latency:
-- `SYNCTEXT_DEBOUNCE_MS` (default 300)
-- `SYNCTEXT_SETTLE_MS` (default 150)
-- `SYNCTEXT_SETTLE_OVERALL_MS` (default 1500)
-- `SYNCTEXT_MASS_DIFF_RECHECK_MS` (default 180) — recheck suspicious “mass change” bursts
+- `SYNCTEXT_DEBOUNCE_MS` (default 0) — extra wait after a file event; above 0 it also waits for events to settle (below)
+- `SYNCTEXT_SETTLE_MS` (default 150) — quiet time required when debouncing
+- `SYNCTEXT_SETTLE_OVERALL_MS` (default 1500) — cap on that wait
+- `SYNCTEXT_MASS_DIFF_RECHECK_MS` (default 150) — recheck suspicious “mass change” bursts
+- `SYNCTEXT_MERGE_WRITE_GRACE_MS` (default 300) — after your own save, wait this long before writing merged text
 
 Broadcasting and queues:
-- `SYNCTEXT_BROADCAST_BATCH_N` (default 5)
+- `SYNCTEXT_BROADCAST_BATCH_N` (default 1) — accepted for compatibility; ops are sent as soon as they are made
 - `SYNCTEXT_MAX_BROADCAST_PER_CYCLE` (default 128)
-- `SYNCTEXT_SEND_RETRY_COUNT` (default 20)
-- `SYNCTEXT_SEND_RETRY_DELAY_MS` (default 2)
-- `SYNCTEXT_MQ_MAXMSG` (default 256)
-
-Block operations:
-- `SYNCTEXT_BLOCK_OPS_MODE` (default 0): 0=never, 1=auto(threshold), 2=always
-- `SYNCTEXT_BLOCK_OPS_MIN_LINES` (default 6): minimum lines to trigger block ops in auto
+- `SYNCTEXT_SEND_RETRY_COUNT` (default 200) — retries when a peer's queue is full
+- `SYNCTEXT_SEND_RETRY_DELAY_MS` (default 5)
+- `SYNCTEXT_MQ_MAXMSG` (default 256) — requested queue depth; unprivileged Linux allows at most `/proc/sys/fs/mqueue/msg_max` (usually 10), in which case the system default is used
 
 Debugging and status:
 - `SYNCTEXT_DEBUG_LEVEL` (0-3; default 0): 0=off, 1=basic, 2=verbose, 3=trace
@@ -588,8 +620,7 @@ The simple arrangement: **host on Linux, join from WSL2.**
 ## Compatibility (important)
 All peers should run the same binary, protocol version, and configuration:
 - Build the latest once and share the `./build/editor` binary across peers, or rebuild on each machine from the same commit.
-- Keep `SYNCTEXT_BLOCK_OPS_MODE` aligned across all users. Default is 0 (disabled) — safest.
-- If you enable block ops (1 or 2), ensure every peer also enables them to avoid mismatched operation types.
+- The CRDT protocol (status banner `protocol=3`) does not interoperate with older builds.
 - Use `SYNCTEXT_STATUS=1` to print a startup banner that helps verify alignment quickly.
 
 ## Hassle-free start

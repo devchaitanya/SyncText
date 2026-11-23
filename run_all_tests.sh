@@ -253,9 +253,9 @@ else
 fi
 
 # ============================================================================
-# TEST 5: Conflicting Edits (LWW)
+# TEST 5: Same line edited twice in a row (the later edit is the result)
 # ============================================================================
-section "Test 5: Conflict Scenarios - LWW Winner"
+section "Test 5: Conflict Scenarios - Sequential Same-Line Edits"
 cleanup
 
 printf "int x = 10;\nint y = 100;\nint z = 30;\n" > $DDIR/u1_doc.txt
@@ -273,7 +273,7 @@ sleep 1
 printf "int x = 75;\nint y = 100;\nint z = 30;\n" > $DDIR/u1_doc.txt
 sleep 0.3
 
-# u2 modifies same line 0 (should win via LWW)
+# u2 then edits the same line again, after seeing u1's edit
 printf "int x = 99;\nint y = 100;\nint z = 30;\n" > $DDIR/u2_doc.txt
 sleep 2
 
@@ -284,9 +284,9 @@ kill $U1_PID $U2_PID 2>/dev/null || true
 sleep 0.5
 
 if [ "$L0_U1" = "int x = 99;" ] && [ "$L0_U2" = "int x = 99;" ]; then
-    pass_test "LWW conflict resolution works correctly"
+    pass_test "Later edit of the same line is the result"
 else
-    fail_test "LWW conflict resolution failed (u1: $L0_U1, u2: $L0_U2)"
+    fail_test "Sequential same-line edits failed (u1: $L0_U1, u2: $L0_U2)"
 fi
 
 # ============================================================================
@@ -359,7 +359,7 @@ fi
 # ============================================================================
 # TEST 8: LAN Mode (--host / --join over TCP)
 # ============================================================================
-section "Test 8: LAN Mode - Snapshot, Relay & Access Code"
+section "Test 8: LAN Mode - Join, Sync & Access Code"
 cleanup
 
 LAN_PORT=${LAN_PORT:-9411}
@@ -396,14 +396,14 @@ else
     fail_test "LAN host edit did not reach joiners"
 fi
 
-# 8c: joiner edit reaches the host and is relayed to the other joiner
+# 8c: joiner edit reaches the host and the other joiner (direct mesh links)
 printf 'alpha\nbeta CHANGED\ngamma\ndelta\nepsilon\n' > $DDIR/j1_doc.txt
 sleep 3
 if diff -q $DDIR/j1_doc.txt $DDIR/h1_doc.txt >/dev/null 2>&1 && \
    diff -q $DDIR/j1_doc.txt $DDIR/j2_doc.txt >/dev/null 2>&1; then
-    pass_test "LAN joiner edit relayed to host and peer joiner"
+    pass_test "LAN joiner edit reached host and peer joiner"
 else
-    fail_test "LAN joiner edit not relayed (host/peer diverged)"
+    fail_test "LAN joiner edit did not reach everyone (host/peer diverged)"
 fi
 
 # 8d: wrong access code is rejected
@@ -419,74 +419,90 @@ kill $H1_PID $J1_PID $J2_PID 2>/dev/null || true
 sleep 1
 
 # ============================================================================
-# TEST 9: LAN Host Failover (primary host dies, session continues)
+# TEST 9: LAN Mesh (direct links, losing any peer, no host to elect)
 # ============================================================================
-section "Test 9: LAN Host Failover"
+section "Test 9: LAN Mesh - Direct Links and Peer Loss"
 cleanup
 
 FO_PORT=$(( ${LAN_PORT:-9411} + 10 ))
-FO_ENV="SYNCTEXT_NO_AUTO_OPEN=1 SYNCTEXT_STATUS=0 SYNCTEXT_DEBUG_LEVEL=0"
+FO_ENV="SYNCTEXT_NO_AUTO_OPEN=1 SYNCTEXT_STATUS=0 SYNCTEXT_DEBUG_LEVEL=1"
 
 printf 'alpha\nbeta\ngamma\n' > $DDIR/h1_doc.txt
 rm -f $DDIR/j1_doc.txt $DDIR/j2_doc.txt
 
-env $FO_ENV SYNCTEXT_USER=h1 SYNCTEXT_PORT_BASE="$FO_PORT" SYNCTEXT_PORT_SPAN=1 "$BIN" --host "$DOC" secret > log_files/fo_h1.log 2>&1 &
+env $FO_ENV SYNCTEXT_USER=h1 SYNCTEXT_PORT_BASE="$FO_PORT" SYNCTEXT_PORT_SPAN=1 "$BIN" --host "$DOC" secret > log_files/fo_h1.log 2> log_files/fo_h1.err &
 FO_H1=$!
 sleep 1
-env $FO_ENV SYNCTEXT_USER=j1 SYNCTEXT_PORT_BASE="$FO_PORT" SYNCTEXT_PORT_SPAN=1 "$BIN" --join 127.0.0.1 secret > log_files/fo_j1.log 2>&1 &
+env $FO_ENV SYNCTEXT_USER=j1 SYNCTEXT_PORT_BASE="$FO_PORT" SYNCTEXT_PORT_SPAN=1 "$BIN" --join 127.0.0.1 secret > log_files/fo_j1.log 2> log_files/fo_j1.err &
 FO_J1=$!
 sleep 0.8
-env $FO_ENV SYNCTEXT_USER=j2 SYNCTEXT_PORT_BASE="$FO_PORT" SYNCTEXT_PORT_SPAN=1 "$BIN" --join 127.0.0.1 secret > log_files/fo_j2.log 2>&1 &
+env $FO_ENV SYNCTEXT_USER=j2 SYNCTEXT_PORT_BASE="$FO_PORT" SYNCTEXT_PORT_SPAN=1 "$BIN" --join 127.0.0.1 secret > log_files/fo_j2.log 2> log_files/fo_j2.err &
 FO_J2=$!
 sleep 1.5
 
-# 9a: the roster reaches every joiner before anything fails
+# 9a: everyone lists everyone, and the two joiners hold a direct link
 ROSTER_J2=$(grep -a "Active users" log_files/fo_j2.log | tail -1 || true)
-if echo "$ROSTER_J2" | grep -q "h1 (host)" && echo "$ROSTER_J2" | grep -q "j1" && echo "$ROSTER_J2" | grep -q "j2"; then
-    pass_test "Roster propagated to joiners (h1 host, j1, j2)"
+if echo "$ROSTER_J2" | grep -q "h1" && echo "$ROSTER_J2" | grep -q "j1" && echo "$ROSTER_J2" | grep -q "j2"; then
+    pass_test "Every participant listed (h1, j1, j2)"
 else
-    fail_test "Roster not propagated to joiners (saw: $ROSTER_J2)"
+    fail_test "Participant list incomplete (saw: $ROSTER_J2)"
+fi
+if grep -q "linked with j2" log_files/fo_j1.err && grep -q "linked with j1" log_files/fo_j2.err; then
+    pass_test "Joiners linked to each other directly (full mesh)"
+else
+    fail_test "Joiners have no direct link (j1: $(grep linked log_files/fo_j1.err | tr '\n' ' '))"
 fi
 
-# 9b: kill the primary host outright; the next in succession order must take over
+# 9b: kill the participant that started the session; the others just drop it
 kill -9 $FO_H1 2>/dev/null || true
 wait $FO_H1 2>/dev/null || true
-sleep 5
+sleep 1
 
 ROSTER_J1=$(grep -a "Active users" log_files/fo_j1.log | tail -1 || true)
 ROSTER_J2=$(grep -a "Active users" log_files/fo_j2.log | tail -1 || true)
-if echo "$ROSTER_J1" | grep -q "j1 (host)" && echo "$ROSTER_J2" | grep -q "j1 (host)"; then
-    pass_test "j1 promoted to host and j2 followed it"
+if ! echo "$ROSTER_J1$ROSTER_J2" | grep -q "h1" && echo "$ROSTER_J1" | grep -q "j2" && echo "$ROSTER_J2" | grep -q "j1"; then
+    pass_test "Lost peer dropped; survivors still linked (no election)"
 else
-    fail_test "Failover election failed (j1: $ROSTER_J1 | j2: $ROSTER_J2)"
+    fail_test "Peer loss not handled (j1: $ROSTER_J1 | j2: $ROSTER_J2)"
 fi
 
-# 9c: editing still syncs both ways under the new host
-printf 'alpha\nbeta\ngamma\nfrom-new-host\n' > $DDIR/j1_doc.txt
-sleep 3
+# 9c: editing still syncs both ways, straight away
+printf 'alpha\nbeta\ngamma\nfrom-j1\n' > $DDIR/j1_doc.txt
+sleep 1
 if diff -q $DDIR/j1_doc.txt $DDIR/j2_doc.txt >/dev/null 2>&1; then
-    pass_test "New host edit propagated after failover"
+    pass_test "Edit propagated after the first participant left"
 else
-    fail_test "New host edit did not propagate after failover"
+    fail_test "Edit did not propagate after the first participant left"
 fi
 
-printf 'alpha\nbeta\ngamma\nfrom-new-host\nfrom-survivor\n' > $DDIR/j2_doc.txt
-sleep 3
+printf 'alpha\nbeta\ngamma\nfrom-j1\nfrom-j2\n' > $DDIR/j2_doc.txt
+sleep 1
 if diff -q $DDIR/j2_doc.txt $DDIR/j1_doc.txt >/dev/null 2>&1; then
-    pass_test "Survivor edit reached the new host after failover"
+    pass_test "Edit propagated in the other direction too"
 else
-    fail_test "Survivor edit did not reach the new host after failover"
+    fail_test "Edit did not propagate in the other direction"
 fi
 
-# 9d: cascade - kill the promoted host too; the last survivor takes over alone
-kill -9 $FO_J1 2>/dev/null || true
-wait $FO_J1 2>/dev/null || true
-sleep 5
-ROSTER_J2=$(grep -a "Active users" log_files/fo_j2.log | tail -1 || true)
-if echo "$ROSTER_J2" | grep -q "j2 (host)"; then
-    pass_test "Cascading failover: last survivor promoted itself"
+# 9d: a newcomer can join through any participant, not only the one that hosted
+J1_PORT=$(grep -o "linked with j1 (127.0.0.1:[0-9]*" log_files/fo_j2.err | head -1 | grep -o "[0-9]*$")
+env $FO_ENV SYNCTEXT_USER=j3 SYNCTEXT_PORT_BASE="$J1_PORT" SYNCTEXT_PORT_SPAN=1 "$BIN" --join 127.0.0.1 secret > log_files/fo_j3.log 2> log_files/fo_j3.err &
+FO_J3=$!
+sleep 2
+if [ -n "$J1_PORT" ] && diff -q $DDIR/j3_doc.txt $DDIR/j2_doc.txt >/dev/null 2>&1 && grep -q "linked with j2" log_files/fo_j3.err; then
+    pass_test "Newcomer joined through a joiner and linked to everyone"
 else
-    fail_test "Cascading failover failed (j2: $ROSTER_J2)"
+    fail_test "Joining through a joiner failed (port: $J1_PORT)"
+fi
+
+# 9e: down to the last participant: it carries on alone
+kill -9 $FO_J1 $FO_J3 2>/dev/null || true
+wait $FO_J1 $FO_J3 2>/dev/null || true
+sleep 1
+ROSTER_J2=$(grep -a "Active users" log_files/fo_j2.log | tail -1 || true)
+if echo "$ROSTER_J2" | grep -q "j2" && ! echo "$ROSTER_J2" | grep -q "j1"; then
+    pass_test "Last participant carries on alone"
+else
+    fail_test "Last participant did not notice it is alone (j2: $ROSTER_J2)"
 fi
 
 kill $FO_J2 2>/dev/null || true
@@ -770,6 +786,149 @@ kill $AH $AJ 2>/dev/null || true
 sleep 1
 kill -9 $AH $AJ 2>/dev/null || true
 rm -rf user_docs/auto
+
+# ============================================================================
+# TEST 16: Concurrent edits through files (the CRDT's main job)
+# ============================================================================
+section "Test 16: Concurrent Edits (files, three users at once)"
+cleanup
+
+CENV="SYNCTEXT_NO_AUTO_OPEN=1 SYNCTEXT_TUI=0 SYNCTEXT_STATUS=0 SYNCTEXT_DEBUG_LEVEL=1"
+printf 'int x = 10;\nint y = 20;\nint z = 30;\n' > $DDIR/u1_doc.txt
+for U in u1 u2 u3; do
+    env $CENV SYNCTEXT_USER=$U "$BIN" "$DOC" > log_files/cc_$U.log 2>&1 &
+    eval "C_$U=\$!"
+    sleep 0.5
+done
+sleep 1.5
+
+# all three save at the same instant, two of them on the same line
+printf 'int x = 10; // u1\nint y = 20;\nint z = 30;\n' > $DDIR/u1_doc.txt & W1=$!
+printf '// u2\nint x = 10;\nint y = 20;\nint z = 30;\n' > $DDIR/u2_doc.txt & W2=$!
+printf 'int x = 99;\nint y = 20;\nint z = 30;\n' > $DDIR/u3_doc.txt & W3=$!
+wait $W1 $W2 $W3     # only the writers; the editors run on in the background
+sleep 4
+
+EXPECT_CC=$'// u2\nint x = 99; // u1\nint y = 20;\nint z = 30;'
+if diff -q $DDIR/u1_doc.txt $DDIR/u2_doc.txt >/dev/null && diff -q $DDIR/u1_doc.txt $DDIR/u3_doc.txt >/dev/null; then
+    pass_test "Three simultaneous saves converge to one document"
+else
+    fail_test "Simultaneous saves diverged"
+fi
+if [ "$(cat $DDIR/u1_doc.txt)" = "$EXPECT_CC" ]; then
+    pass_test "Every concurrent edit is kept, including two on the same line"
+else
+    fail_test "Concurrent edits lost (got: $(tr '\n' '|' < $DDIR/u1_doc.txt))"
+fi
+kill $C_u1 $C_u2 $C_u3 2>/dev/null || true
+sleep 1
+
+# ============================================================================
+# TEST 17: Lost messages are repaired (anti-entropy)
+# ============================================================================
+section "Test 17: Lost Messages Are Repaired"
+cleanup
+
+printf 'start\n' > $DDIR/u1_doc.txt
+# u1 gives up on a full queue immediately, so messages to a stalled peer are lost
+env $CENV SYNCTEXT_DEBUG_LEVEL=3 SYNCTEXT_SEND_RETRY_COUNT=0 SYNCTEXT_USER=u1 "$BIN" "$DOC" > log_files/ae_u1.log 2>&1 &
+AE1=$!
+sleep 0.5
+env $CENV SYNCTEXT_USER=u2 "$BIN" "$DOC" > log_files/ae_u2.log 2>&1 &
+AE2=$!
+sleep 1.5
+
+kill -STOP $AE2                 # u2 stops reading its queue (10 messages deep)
+for i in $(seq 1 25); do
+    printf 'start\n' > $DDIR/tmp_ae.txt
+    for k in $(seq 1 $i); do echo "line $k" >> $DDIR/tmp_ae.txt; done
+    cp $DDIR/tmp_ae.txt $DDIR/u1_doc.txt
+    sleep 0.15
+done
+rm -f $DDIR/tmp_ae.txt
+sleep 0.5
+kill -CONT $AE2
+sleep 6
+
+if grep -aq "mq_send failed after retries" log_files/ae_u1.log; then
+    pass_test "Messages to the stalled peer were really dropped"
+else
+    fail_test "Expected dropped messages while the peer was stopped"
+fi
+if diff -q $DDIR/u1_doc.txt $DDIR/u2_doc.txt >/dev/null 2>&1 && grep -q "^line 25$" $DDIR/u2_doc.txt; then
+    pass_test "The stalled peer caught up on every edit it missed"
+else
+    fail_test "Lost edits were not repaired (u2 has $(wc -l < $DDIR/u2_doc.txt) lines)"
+fi
+kill $AE1 $AE2 2>/dev/null || true
+sleep 1
+
+# ============================================================================
+# TEST 18: Concurrent edits over LAN, and edits made while a peer is going down
+# ============================================================================
+section "Test 18: LAN Concurrent Edits and Peer Loss"
+cleanup
+
+CC_PORT=${CC_PORT:-9431}
+LENV="SYNCTEXT_NO_AUTO_OPEN=1 SYNCTEXT_TUI=0 SYNCTEXT_STATUS=0 SYNCTEXT_DEBUG_LEVEL=1 SYNCTEXT_PORT_BASE=$CC_PORT SYNCTEXT_PORT_SPAN=1"
+printf 'red\ngreen\nblue\n' > $DDIR/h1_doc.txt
+rm -f $DDIR/j1_doc.txt $DDIR/j2_doc.txt
+env $LENV SYNCTEXT_USER=h1 "$BIN" --host "$DOC" cccode > log_files/lc_h1.log 2>&1 & LH=$!
+sleep 1
+env $LENV SYNCTEXT_USER=j1 "$BIN" --join 127.0.0.1 cccode > log_files/lc_j1.log 2>&1 & LJ1=$!
+sleep 0.5
+env $LENV SYNCTEXT_USER=j2 "$BIN" --join 127.0.0.1 cccode > log_files/lc_j2.log 2>&1 & LJ2=$!
+sleep 2
+
+printf 'red!\ngreen\nblue\n' > $DDIR/h1_doc.txt & W1=$!
+printf 'red?\ngreen\nblue\n' > $DDIR/j1_doc.txt & W2=$!
+printf 'red\ngreen\nblue\nwhite\n' > $DDIR/j2_doc.txt & W3=$!
+wait $W1 $W2 $W3
+sleep 4
+if diff -q $DDIR/h1_doc.txt $DDIR/j1_doc.txt >/dev/null && diff -q $DDIR/h1_doc.txt $DDIR/j2_doc.txt >/dev/null && \
+   grep -q '^red[!?][!?]$' $DDIR/h1_doc.txt && grep -q '^white$' $DDIR/h1_doc.txt; then
+    pass_test "Simultaneous LAN edits (two on one line) converge with all edits kept"
+else
+    fail_test "LAN concurrent edits diverged or lost text (h1: $(tr '\n' '|' < $DDIR/h1_doc.txt) j1: $(tr '\n' '|' < $DDIR/j1_doc.txt))"
+fi
+
+kill -9 $LH 2>/dev/null || true
+# j2 saves straight away, while the peer it joined through is going down
+printf '%s\nduring-failover\n' "$(cat $DDIR/j2_doc.txt)" > $DDIR/j2_doc.txt
+sleep 2   # no election to wait for
+printf 'top\n%s\n' "$(cat $DDIR/j1_doc.txt)" > $DDIR/j1_doc.txt
+sleep 4
+if diff -q $DDIR/j1_doc.txt $DDIR/j2_doc.txt >/dev/null && grep -q '^during-failover$' $DDIR/j1_doc.txt && \
+   grep -q '^top$' $DDIR/j2_doc.txt; then
+    pass_test "An edit made as a peer went down still reaches the survivors"
+else
+    fail_test "Failover lost an edit (j1: $(tr '\n' '|' < $DDIR/j1_doc.txt) j2: $(tr '\n' '|' < $DDIR/j2_doc.txt))"
+fi
+kill $LJ1 $LJ2 2>/dev/null || true
+sleep 1
+
+# ============================================================================
+# TEST 19: Concurrent typing in the built-in editor
+# ============================================================================
+section "Test 19: Concurrent Typing in the Built-in Editor"
+cleanup
+rm -rf user_docs/cc_ends user_docs/cc_spot user_docs/cc_three user_docs/cc_caret
+
+if ! command -v python3 >/dev/null 2>&1; then
+    echo -e "${YELLOW}[SKIP]${NC} python3 not available; needs a pty harness"
+else
+    CC_OUT=$(timeout 240 python3 tests/concurrency_test.py 2>&1 || true)
+    while IFS= read -r line; do
+        case "$line" in
+            "RESULT PASS "*) pass_test "${line#RESULT PASS }" ;;
+            "RESULT FAIL "*) fail_test "${line#RESULT FAIL }" ;;
+        esac
+    done <<< "$CC_OUT"
+    if ! echo "$CC_OUT" | grep -q "^RESULT "; then
+        fail_test "Concurrency test produced no results"
+    fi
+fi
+rm -rf user_docs/cc_ends user_docs/cc_spot user_docs/cc_three user_docs/cc_caret
 
 # ============================================================================
 # SUMMARY

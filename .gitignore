@@ -1,6 +1,7 @@
 # Build artifacts
 build/*.o
 build/editor
+build/*.d
 
 # User document files (generated in user_docs/, incl. per --doc subdirectories)
 user_docs/*_doc.txt
@@ -33,3 +34,12 @@ Thumbs.db
 # Message queues and shared memory (runtime artifacts)
 /dev/mqueue/synctext_*
 /dev/shm/synctext_*
+
+# CRDT unit-test build output
+tests/crdt/build/
+
+# Per-run stderr logs written by the test suite
+log_files/*.err
+
+# Python bytecode
+__pycache__/
