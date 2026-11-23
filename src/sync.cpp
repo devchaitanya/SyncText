@@ -470,6 +470,71 @@ bool sync_local_edit(const std::vector<std::string>& new_lines) {
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// Built-in editor: edits the key handler already knows
+//
+// sync_local_edit has to rediscover an edit by diffing the whole text, and in
+// repeated text a diff can only guess which characters changed: deleting the
+// first "BCD" of "ABCDBCDBCD" looks exactly like deleting the last one, and a
+// peer's concurrent insert inside the kept copy would then end up in the wrong
+// place. The built-in editor knows the caret, so it names the exact node instead.
+// ---------------------------------------------------------------------------
+namespace {
+
+std::vector<crdt::Op> g_tui_ops;               // made by the calls below, sent by sync_tui_flush
+
+/// (row, col) of the editor buffer -> offset in the baseline. Fails unless the
+/// baseline describes exactly this buffer, so a mismatch falls back to diffing
+/// instead of anchoring on the wrong node.
+bool tui_offset(const std::vector<std::string>& lines, size_t row, size_t col, size_t& off) {
+    if (!sync_ready() || !g_base_valid || row >= lines.size() || col > lines[row].size()) return false;
+    size_t total = lines.size() - 1;           // the newlines between rows
+    off = col;
+    for (size_t r = 0; r < lines.size(); ++r) {
+        total += lines[r].size();
+        if (r < row) off += lines[r].size() + 1;
+    }
+    return total == g_base_text.size() && g_base_nodes.size() == g_base_text.size();
+}
+
+}  // namespace
+
+bool sync_tui_insert(const std::vector<std::string>& lines, size_t row, size_t col, char ch) {
+    size_t off = 0;
+    if (!tui_offset(lines, row, col, off)) return false;
+    char before = col > 0 ? lines[row][col - 1] : '\n';
+    if (off > 0 && g_base_text[off - 1] != before) return false;
+    // Anchor on the node the user sees just before the caret (HEAD at the very start).
+    const crdt::Node* anchor = off > 0 ? g_base_nodes[off - 1] : g_rep->sequence().head();
+    crdt::Op op = g_rep->insert_after(anchor, ch);
+    const crdt::Node* node = g_rep->sequence().find(op.id);
+    g_base_text.insert(off, 1, ch);
+    g_base_nodes.insert(g_base_nodes.begin() + static_cast<long>(off), node);
+    g_tui_ops.push_back(std::move(op));
+    return true;
+}
+
+bool sync_tui_erase(const std::vector<std::string>& lines, size_t row, size_t col) {
+    size_t off = 0;
+    if (!tui_offset(lines, row, col, off) || off >= g_base_text.size()) return false;
+    char shown = col < lines[row].size() ? lines[row][col] : '\n';
+    if (g_base_text[off] != shown) return false;
+    // Exactly the node under the caret. If a peer already deleted it, no op is made.
+    for (auto& op : g_rep->erase_nodes({g_base_nodes[off]})) g_tui_ops.push_back(std::move(op));
+    g_base_text.erase(off, 1);
+    g_base_nodes.erase(g_base_nodes.begin() + static_cast<long>(off));
+    return true;
+}
+
+bool sync_tui_flush() {
+    if (g_tui_ops.empty()) return false;
+    std::vector<crdt::Op> ops;
+    ops.swap(g_tui_ops);
+    if (g_debug_level >= 2) std::cerr << "[sync] editor keys: " << ops.size() << " op(s)\n";
+    send_ops(ops);                             // one batch, so a paste still travels as a run
+    return true;
+}
+
 void sync_handle(const Update& u) {
     if (!g_rep) return;
     if (u.type == Update::Type::CrdtOps) {

@@ -318,6 +318,14 @@ void sync_start();
 bool sync_ready();
 /// The file or buffer now holds new_lines: turn the change into ops and send them.
 bool sync_local_edit(const std::vector<std::string>& new_lines);
+/// Built-in editor: one edit at (row, col) of `lines`, the buffer *before* the edit.
+/// Insert puts `ch` ('\n' splits the row) at the caret; erase removes the symbol at
+/// (row, col), where col == row length means the row's line break. Returns false if
+/// the edit cannot be mapped; then diff the edited buffer with sync_local_edit.
+bool sync_tui_insert(const std::vector<std::string>& lines, size_t row, size_t col, char ch);
+bool sync_tui_erase(const std::vector<std::string>& lines, size_t row, size_t col);
+/// Send the ops made by sync_tui_insert/erase as one batch. True if any were sent.
+bool sync_tui_flush();
 /// Handle a CrdtOps or CrdtSync envelope from a peer.
 void sync_handle(const Update& u);
 /// Housekeeping: join timeout, periodic anti-entropy, reconnect resync.

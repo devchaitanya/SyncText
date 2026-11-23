@@ -18,7 +18,8 @@ namespace synctext {
 // An external GUI editor only tells us anything when the user saves, so it can
 // never show per-character updates and has nowhere to draw a peer's caret. This
 // editor keeps the document in the terminal: every keystroke mutates the shared
-// buffer, is diffed immediately and sent as CRDT ops (sync.cpp). Caret positions
+// buffer and is sent at once as CRDT ops that name exactly the characters it
+// touched (sync_tui_insert/erase in sync.cpp; a diff only as a fallback). Caret positions
 // travel as Update::Type::Cursor records, which never touch the document.
 // ============================================================================
 
@@ -441,7 +442,19 @@ static TuiKey tui_next_key(char& out_ch) {
 }
 
 /// Apply pending keystrokes to the buffer. Returns true if the text changed.
-static bool tui_handle_keys(std::vector<std::string>& buf, bool& out_moved) {
+///
+/// Each edit is also handed to the sync engine as it happens, by caret position, so
+/// the ops name exactly the characters the key touched (sync_tui_insert/erase). If
+/// one cannot be mapped, out_need_diff asks the caller to diff the buffer instead.
+static bool tui_handle_keys(std::vector<std::string>& buf, bool& out_moved, bool& out_need_diff) {
+    // Call before the buffer changes: (row, col) are positions in what the user saw.
+    out_need_diff = false;
+    auto send_insert = [&](char c) {
+        if (!out_need_diff && !sync_tui_insert(buf, g_cur_line, g_cur_col, c)) out_need_diff = true;
+    };
+    auto send_erase = [&](size_t row, size_t col) {
+        if (!out_need_diff && !sync_tui_erase(buf, row, col)) out_need_diff = true;
+    };
     char rbuf[256];
     ssize_t n = read(g_tui_in_fd, rbuf, sizeof(rbuf));
     if (n > 0) g_key_pending.append(rbuf, (size_t)n);
@@ -479,9 +492,11 @@ static bool tui_handle_keys(std::vector<std::string>& buf, bool& out_moved) {
             case TuiKey::PgUp: g_cur_line = (g_cur_line > 10) ? g_cur_line - 10 : 0; out_moved = true; break;
             case TuiKey::PgDn: g_cur_line = std::min(buf.size() - 1, g_cur_line + 10); out_moved = true; break;
             case TuiKey::Char:
+                send_insert(ch);
                 buf[g_cur_line].insert(g_cur_col, 1, ch);
                 ++g_cur_col; edited = true; break;
             case TuiKey::Enter: {
+                send_insert('\n');
                 std::string tail = buf[g_cur_line].substr(g_cur_col);
                 buf[g_cur_line].erase(g_cur_col);
                 buf.insert(buf.begin() + (long)g_cur_line + 1, tail);
@@ -489,10 +504,12 @@ static bool tui_handle_keys(std::vector<std::string>& buf, bool& out_moved) {
             }
             case TuiKey::Backspace:
                 if (g_cur_col > 0) {
+                    send_erase(g_cur_line, g_cur_col - 1);
                     buf[g_cur_line].erase(g_cur_col - 1, 1);
                     --g_cur_col; edited = true;
                 } else if (g_cur_line > 0) {
                     size_t join_at = buf[g_cur_line - 1].size();
+                    send_erase(g_cur_line - 1, join_at);       // the line break before this row
                     buf[g_cur_line - 1] += buf[g_cur_line];
                     buf.erase(buf.begin() + (long)g_cur_line);
                     --g_cur_line; g_cur_col = join_at; edited = true;
@@ -500,8 +517,10 @@ static bool tui_handle_keys(std::vector<std::string>& buf, bool& out_moved) {
                 break;
             case TuiKey::DelFwd:
                 if (g_cur_col < buf[g_cur_line].size()) {
+                    send_erase(g_cur_line, g_cur_col);
                     buf[g_cur_line].erase(g_cur_col, 1); edited = true;
                 } else if (g_cur_line + 1 < buf.size()) {
+                    send_erase(g_cur_line, buf[g_cur_line].size());   // this row's line break
                     buf[g_cur_line] += buf[g_cur_line + 1];
                     buf.erase(buf.begin() + (long)g_cur_line + 1); edited = true;
                 }
@@ -624,7 +643,8 @@ bool open_edit_window() {
 bool tui_step(std::vector<std::string>& buf, struct timespec& last_mtime) {
     bool moved = false;
     std::vector<std::string> before = buf;
-    bool edited = tui_handle_keys(buf, moved);
+    bool need_diff = false;
+    bool edited = tui_handle_keys(buf, moved, need_diff);
     if (edited && !sync_ready()) {
         // Still receiving the shared document; an edit now would be overwritten by it.
         buf = std::move(before);
@@ -633,7 +653,10 @@ bool tui_step(std::vector<std::string>& buf, struct timespec& last_mtime) {
         return true;
     }
     if (edited) {
-        if (sync_local_edit(buf)) g_last_local_change_ns.store(now_ns(), std::memory_order_relaxed);
+        // Ops named by the keys go first, then a diff for whatever they could not map.
+        bool sent = sync_tui_flush();
+        if (need_diff && sync_local_edit(buf)) sent = true;
+        if (sent) g_last_local_change_ns.store(now_ns(), std::memory_order_relaxed);
         tui_write_buffer(buf, last_mtime);
     }
     if (edited || moved) tui_broadcast_cursor(false);

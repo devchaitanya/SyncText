@@ -71,7 +71,7 @@ Individual tests are in the `tests/` directory.
 Running in a terminal drops you straight into SyncText's own editor. This is the
 default because an external application only reports a change when you *save*, which
 makes per-character updates impossible and leaves nowhere to draw a collaborator's
-caret. Editing in the terminal means every keystroke is diffed and broadcast as you
+caret. Editing in the terminal means every keystroke is broadcast, as the exact characters it touched, as you
 type, and every peer's caret is drawn in the document in its own colour.
 
 ```

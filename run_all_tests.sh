@@ -931,6 +931,29 @@ fi
 rm -rf user_docs/cc_ends user_docs/cc_spot user_docs/cc_three user_docs/cc_caret
 
 # ============================================================================
+# TEST 20: Concurrent edits land where the user meant them (repeated text)
+# ============================================================================
+section "Test 20: Edit Intent in Repeated Text"
+cleanup
+rm -rf user_docs/intent1 user_docs/intent2
+
+if ! command -v python3 >/dev/null 2>&1; then
+    echo -e "${YELLOW}[SKIP]${NC} python3 not available; needs a pty harness"
+else
+    IN_OUT=$(timeout 120 python3 tests/tui_intent_test.py 2>&1 || true)
+    while IFS= read -r line; do
+        case "$line" in
+            "RESULT PASS "*) pass_test "${line#RESULT PASS }" ;;
+            "RESULT FAIL "*) fail_test "${line#RESULT FAIL }" ;;
+        esac
+    done <<< "$IN_OUT"
+    if ! echo "$IN_OUT" | grep -q "^RESULT "; then
+        fail_test "Intent test produced no results"
+    fi
+fi
+rm -rf user_docs/intent1 user_docs/intent2
+
+# ============================================================================
 # SUMMARY
 # ============================================================================
 cleanup
